@@ -246,7 +246,7 @@ mod test {
 
     #[test]
     fn sync_logs_are_accessible() -> anyhow::Result<()> {
-        let image = GenericImage::new("testcontainers/helloworld", "1.1.0");
+        let image = GenericImage::new("testcontainers/helloworld", "1.2.0");
         let container = image.start()?;
 
         let stderr = container.stderr(true);

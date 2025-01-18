@@ -422,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_logs_are_accessible() -> anyhow::Result<()> {
-        let image = GenericImage::new("testcontainers/helloworld", "1.1.0");
+        let image = GenericImage::new("testcontainers/helloworld", "1.2.0");
         let container = image.start().await?;
 
         let stderr = container.stderr(true);
@@ -514,7 +514,7 @@ mod tests {
             ("test-name", "async_containers_are_reused"),
         ];
 
-        let initial_image = GenericImage::new("testcontainers/helloworld", "1.1.0")
+        let initial_image = GenericImage::new("testcontainers/helloworld", "1.2.0")
             .with_reuse(crate::ReuseDirective::CurrentSession)
             .with_labels(labels);
 
@@ -576,7 +576,7 @@ mod tests {
             ("test-name", "async_reused_containers_are_not_confused"),
         ];
 
-        let initial_image = GenericImage::new("testcontainers/helloworld", "1.1.0")
+        let initial_image = GenericImage::new("testcontainers/helloworld", "1.2.0")
             .with_reuse(ReuseDirective::Always)
             .with_labels(labels);
 
@@ -632,7 +632,7 @@ mod tests {
 
         let client = crate::core::client::docker_client_instance().await?;
 
-        let image = GenericImage::new("testcontainers/helloworld", "1.1.0")
+        let image = GenericImage::new("testcontainers/helloworld", "1.2.0")
             .with_reuse(ReuseDirective::Always)
             .with_labels([
                 ("foo", "bar"),
