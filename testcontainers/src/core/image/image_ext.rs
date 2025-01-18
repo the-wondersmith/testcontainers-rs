@@ -11,12 +11,35 @@ use crate::{
     ContainerRequest, Image,
 };
 
+/// The "reusability" configuration of a `testcontainers`-created container
 #[cfg(feature = "reusable-containers")]
 #[derive(Eq, Copy, Clone, Debug, Default, PartialEq)]
 pub enum ReuseDirective {
     #[default]
+    /// The default or standard behavior; a new container
+    /// should be started for every [`ContainerRequest`]
     Never,
+
+    /// Make a best-effort attempt to reuse containers by
+    /// trying to find the first running container whose
+    /// configuration matches that of the [`ContainerRequest`]
+    /// being started, and only starting a new container if
+    /// no matching containers exist. If *more* than one matching
+    /// container is found, the container that was most recently
+    /// created will be reused.
     Always,
+
+    /// Same rules as the [`Always`] directive, but with the
+    /// added restriction that the reused container must have
+    /// been created by the current "session" (i.e. run of a test
+    /// / test suite / application / etc ...)
+    ///
+    /// **NOTE:** *generally* this added restriction means that no
+    /// running containers will match the filters upon first inspection,
+    /// due to the [session id](crate::runners::async_runner::session_id)
+    /// being globally unique for each "run", meaning a container will
+    /// pretty much always be started for every initial (unique) request.
+    /// Subsequent requests should then reuse the created container.
     CurrentSession,
 }
 
