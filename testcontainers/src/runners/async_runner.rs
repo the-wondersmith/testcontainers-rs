@@ -114,7 +114,7 @@ where
             if matches!(container_req.reuse(), Always | CurrentSession) {
                 if let Some(container_id) = client
                     .get_running_container_id(
-                        container_req.container_name().as_deref(),
+                        container_req.descriptor(),
                         container_req.network().as_deref(),
                         &labels,
                     )

@@ -421,19 +421,30 @@ impl Client {
         Some(bollard_credentials)
     }
 
-    /// Get the `id` of the first running container whose `name`, `network`,
+    /// Get the `id` of the first running container whose `image-name[:image-tag]`, `network`,
     /// and `labels` match the supplied values
     #[cfg_attr(not(feature = "reusable-containers"), allow(dead_code))]
     pub(crate) async fn get_running_container_id(
         &self,
-        name: Option<&str>,
+        image_descriptor: String,
         network: Option<&str>,
         labels: &HashMap<String, String>,
     ) -> Result<Option<String>, ClientError> {
         let filters = [
-            Some(("status".to_string(), vec!["running".to_string()])),
-            name.map(|value| ("name".to_string(), vec![value.to_string()])),
+            Some(("ancestor".to_string(), vec![image_descriptor])),
             network.map(|value| ("network".to_string(), vec![value.to_string()])),
+            Some((
+                "status".to_string(),
+                vec!["created".to_string(), "running".to_string()],
+            )),
+            Some((
+                "health".to_string(),
+                vec![
+                    "none".to_string(),
+                    "healthy".to_string(),
+                    "starting".to_string(),
+                ],
+            )),
             Some((
                 "label".to_string(),
                 labels

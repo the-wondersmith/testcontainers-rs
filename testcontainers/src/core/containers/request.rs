@@ -154,11 +154,15 @@ impl<I: Image> ContainerRequest<I> {
     }
 
     pub fn descriptor(&self) -> String {
-        let original_name = self.image.name();
-        let original_tag = self.image.tag();
+        let name = self
+            .image_name
+            .as_deref()
+            .unwrap_or_else(|| self.image.name());
 
-        let name = self.image_name.as_deref().unwrap_or(original_name);
-        let tag = self.image_tag.as_deref().unwrap_or(original_tag);
+        let tag = self
+            .image_tag
+            .as_deref()
+            .unwrap_or_else(|| self.image.tag());
 
         format!("{name}:{tag}")
     }
