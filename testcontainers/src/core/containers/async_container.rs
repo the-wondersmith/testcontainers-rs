@@ -425,32 +425,42 @@ where
         {
             use crate::ReuseDirective::{Always, CurrentSession};
 
-            if !self.dropped && matches!(self.reuse, Always | CurrentSession) {
-                log::debug!("Declining to reap container marked for reuse: {}", &self.id);
+            if matches!(self.reuse, Always | CurrentSession) {
+                log::trace!(
+                    "Declining to reap container {} (marked as reuse = {:?})",
+                    &self.id,
+                    self.reuse,
+                );
 
                 return;
             }
         }
 
         if !self.dropped {
-            let id = self.id.clone();
-            let client = self.docker_client.clone();
-            let command = self.docker_client.config.command();
+            let (id, client, command) = (
+                self.id.clone(),
+                self.docker_client.clone(),
+                self.docker_client.config.command(),
+            );
 
             let drop_task = async move {
-                log::trace!("Drop was called for container {id}, cleaning up");
                 match command {
+                    env::Command::Keep => {
+                        log::trace!("Declining to reap container {id} (env command = {command:?})");
+                    }
                     env::Command::Remove => {
-                        if let Err(e) = client.rm(&id).await {
-                            log::error!("Failed to remove container on drop: {}", e);
+                        log::trace!("Drop was called for container {id}, cleaning up");
+
+                        if let Err(error) = client.rm(&id).await {
+                            log::error!("Failed to remove container on drop: {error}");
                         }
                     }
-                    env::Command::Keep => {}
                 }
+
                 #[cfg(feature = "watchdog")]
                 crate::watchdog::unregister(&id);
 
-                log::debug!("Container {id} was successfully dropped");
+                log::trace!("Container {id} was successfully dropped");
             };
 
             async_drop::async_drop(drop_task);
