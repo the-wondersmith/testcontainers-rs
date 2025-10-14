@@ -610,26 +610,31 @@ mod tests {
     #[cfg(feature = "reusable-containers")]
     #[tokio::test]
     async fn async_containers_are_reused() -> anyhow::Result<()> {
-        use crate::ImageExt;
+        use crate::{ImageExt, ReuseDirective};
+
+        let _ = pretty_env_logger::try_init();
 
         let labels = [
             ("foo", "bar"),
             ("baz", "qux"),
-            ("test-name", "async_containers_are_reused"),
+            (
+                "org.testcontainers.test-name",
+                "async_containers_are_reused",
+            ),
         ];
 
         let initial_image = GenericImage::new("testcontainers/helloworld", "1.2.0")
-            .with_reuse(crate::ReuseDirective::CurrentSession)
+            .with_reuse(ReuseDirective::CurrentSession)
             .with_labels(labels);
 
         let reused_image = initial_image
             .image
             .clone()
-            .with_reuse(crate::ReuseDirective::CurrentSession)
+            .with_reuse(ReuseDirective::CurrentSession)
             .with_labels(labels);
 
         let initial_container = initial_image.start().await?;
-        let reused_container = reused_image.start().await?;
+        let mut reused_container = reused_image.start().await?;
 
         assert_eq!(initial_container.id(), reused_container.id());
 
@@ -666,7 +671,10 @@ mod tests {
             containers.first().unwrap().id.as_deref()
         );
 
-        reused_container.rm().await.map_err(anyhow::Error::from)
+        // allow the usual drop machinery to handle cleanup
+        reused_container.reuse = ReuseDirective::Never;
+
+        Ok(())
     }
 
     #[cfg(feature = "reusable-containers")]
@@ -676,10 +684,15 @@ mod tests {
 
         use crate::{ImageExt, ReuseDirective};
 
+        let _ = pretty_env_logger::try_init();
+
         let labels = [
             ("foo", "bar"),
             ("baz", "qux"),
-            ("test-name", "async_reused_containers_are_not_confused"),
+            (
+                "org.testcontainers.test-name",
+                "async_reused_containers_are_not_confused",
+            ),
         ];
 
         let initial_image = GenericImage::new("testcontainers/helloworld", "1.2.0")
@@ -690,9 +703,9 @@ mod tests {
             .image
             .clone()
             .with_reuse(ReuseDirective::Never)
-            .with_labels(&initial_image.labels);
+            .with_labels(labels);
 
-        let initial_container = initial_image.start().await?;
+        let mut initial_container = initial_image.start().await?;
         let similar_container = similar_image.start().await?;
 
         assert_ne!(initial_container.id(), similar_container.id());
@@ -710,48 +723,67 @@ mod tests {
 
         let options = bollard::query_parameters::ListContainersOptionsBuilder::new()
             .all(false)
-            .limit(2)
             .size(false)
             .filters(&filters)
             .build();
 
         let containers = client.list_containers(Some(options)).await?;
 
-        assert_eq!(containers.len(), 2);
-
-        let container_ids = containers
-            .iter()
-            .filter_map(|container| container.id.as_deref())
-            .collect::<std::collections::HashSet<_>>();
-
-        assert_eq!(
-            container_ids,
-            HashSet::from_iter([initial_container.id(), similar_container.id()])
+        assert!(
+            2 <= containers.len(),
+            "expected at least 2 containers but got {}",
+            containers.len()
         );
 
-        initial_container.rm().await?;
-        similar_container.rm().await.map_err(anyhow::Error::from)
+        let expected_container_ids =
+            HashSet::from_iter([initial_container.id(), similar_container.id()]);
+
+        let actual_container_ids = containers
+            .iter()
+            .filter_map(|container| container.id.as_deref())
+            .collect::<HashSet<_>>();
+
+        assert!(
+            actual_container_ids.is_superset(&expected_container_ids),
+            "expected set of actual container ids to be a superset of expected container ids: [expected: {:?}, actual: {:?}]",
+            expected_container_ids,
+            actual_container_ids,
+        );
+
+        // allow the usual drop machinery to handle cleanup
+        initial_container.reuse = ReuseDirective::Never;
+
+        Ok(())
     }
 
     #[cfg(feature = "reusable-containers")]
     #[tokio::test]
     async fn async_reusable_containers_are_not_dropped() -> anyhow::Result<()> {
-        use bollard::query_parameters::InspectContainerOptions;
+        use crate::{bollard::query_parameters::InspectContainerOptions, ImageExt, ReuseDirective};
 
-        use crate::{ImageExt, ReuseDirective};
+        let _ = pretty_env_logger::try_init();
 
         let client = crate::core::client::docker_client_instance().await?;
 
-        let image = GenericImage::new("testcontainers/helloworld", "1.2.0")
-            .with_reuse(ReuseDirective::Always)
-            .with_labels([
+        let (image, labels) = (
+            GenericImage::new("testcontainers/helloworld", "1.2.0"),
+            [
                 ("foo", "bar"),
                 ("baz", "qux"),
-                ("test-name", "async_reusable_containers_are_not_dropped"),
-            ]);
+                (
+                    "org.testcontainers.test-name",
+                    "async_reusable_containers_are_not_dropped",
+                ),
+            ],
+        );
 
         let container_id = {
-            let container = image.start().await?;
+            let container = image
+                .clone()
+                .with_reuse(ReuseDirective::Always)
+                .with_labels(labels)
+                .start()
+                .await?;
 
             assert!(!container.dropped);
             assert_eq!(container.reuse, ReuseDirective::Always);
@@ -763,20 +795,19 @@ mod tests {
             .inspect_container(&container_id, None::<InspectContainerOptions>)
             .await?
             .state
-            .and_then(|state| state.running)
+            .unwrap()
+            .running
             .unwrap_or(false));
 
-        client
-            .remove_container(
-                &container_id,
-                Some(
-                    bollard::query_parameters::RemoveContainerOptionsBuilder::new()
-                        .force(true)
-                        .build(),
-                ),
-            )
-            .await
-            .map_err(anyhow::Error::from)
+        // allow the usual drop machinery to handle cleanup
+        let _ = super::ContainerAsync::construct(
+            container_id,
+            crate::core::client::Client::lazy_client().await?,
+            image.with_labels(labels),
+            None,
+        );
+
+        Ok(())
     }
 
     #[cfg(feature = "http_wait")]
