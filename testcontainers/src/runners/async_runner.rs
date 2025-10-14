@@ -2,10 +2,11 @@ use std::{collections::HashMap, time::Duration};
 
 use async_trait::async_trait;
 use bollard::{
-    container::{Config, CreateContainerOptions},
-    models::{HostConfig, PortBinding},
+    models::{
+        ContainerCreateBody, HostConfig, HostConfigCgroupnsModeEnum, PortBinding, ResourcesUlimits,
+    },
+    query_parameters::{CreateContainerOptions, CreateContainerOptionsBuilder},
 };
-use bollard_stubs::models::{HostConfigCgroupnsModeEnum, ResourcesUlimits};
 
 use crate::{
     core::{
@@ -75,7 +76,7 @@ where
         let container_req = self.into();
 
         let client = Client::lazy_client().await?;
-        let mut create_options: Option<CreateContainerOptions<String>> = None;
+        let mut create_options: Option<CreateContainerOptions> = None;
 
         let extra_hosts: Vec<_> = container_req
             .hosts()
@@ -136,7 +137,7 @@ where
             }
         }
 
-        let mut config: Config<String> = Config {
+        let mut config = ContainerCreateBody {
             image: Some(container_req.descriptor()),
             labels: Some(labels),
             host_config: Some(HostConfig {
@@ -146,9 +147,15 @@ where
                 userns_mode: container_req.userns_mode().map(|v| v.to_string()),
                 cap_add: container_req.cap_add().cloned(),
                 cap_drop: container_req.cap_drop().cloned(),
+                readonly_rootfs: Some(container_req.readonly_rootfs()),
+                security_opt: container_req.security_opts().cloned(),
                 ..Default::default()
             }),
             working_dir: container_req.working_dir().map(|dir| dir.to_string()),
+            user: container_req.user().map(|user| user.to_string()),
+            healthcheck: container_req
+                .health_check()
+                .map(|hc| hc.clone().into_health_config()),
             ..Default::default()
         };
 
@@ -173,10 +180,11 @@ where
 
         // name of the container
         if let Some(name) = container_req.container_name() {
-            create_options = Some(CreateContainerOptions {
-                name: name.to_owned(),
-                platform: None,
-            })
+            let options = CreateContainerOptionsBuilder::new()
+                .name(name)
+                .platform(client.config.platform().unwrap_or_default())
+                .build();
+            create_options = Some(options)
         }
 
         // handle environment variables
@@ -267,6 +275,17 @@ where
             });
         }
 
+        #[cfg(feature = "device-requests")]
+        {
+            // device requests
+            if let Some(device_requests) = &container_req.device_requests {
+                config.host_config = config.host_config.map(|mut host_config| {
+                    host_config.device_requests = Some(device_requests.clone());
+                    host_config
+                });
+            }
+        }
+
         let cmd: Vec<_> = container_req.cmd().map(|v| v.to_string()).collect();
         if !cmd.is_empty() {
             config.cmd = Some(cmd);
@@ -289,8 +308,7 @@ where
             res => res,
         }?;
 
-        let copy_to_sources: Vec<&CopyToContainer> =
-            container_req.copy_to_sources().map(Into::into).collect();
+        let copy_to_sources: Vec<&CopyToContainer> = container_req.copy_to_sources().collect();
 
         for copy_to_source in copy_to_sources {
             client
@@ -313,7 +331,7 @@ where
             let container =
                 ContainerAsync::new(container_id, client.clone(), container_req, network).await?;
 
-            let state = ContainerState::new(container.id(), container.ports().await?);
+            let state = ContainerState::from_container(&container).await?;
             for cmd in container.image().exec_after_start(state)? {
                 container.exec(cmd).await?;
             }
@@ -368,8 +386,22 @@ mod tests {
     use crate::{
         core::{IntoContainerPort, WaitFor},
         images::generic::GenericImage,
-        ImageExt,
+        runners::AsyncBuilder,
+        GenericBuildableImage, ImageExt,
     };
+
+    async fn get_server_container() -> GenericImage {
+        let generic_image = GenericBuildableImage::new("simple_web_server", "latest")
+            // "Dockerfile" is included already, so adding the build context directory is all what is needed
+            .with_file(
+                std::fs::canonicalize("../testimages/simple_web_server").unwrap(),
+                ".",
+            )
+            .build_image()
+            .await
+            .unwrap();
+        generic_image.with_wait_for(WaitFor::message_on_stdout("server is ready"))
+    }
 
     /// Test that all user-supplied labels are added to containers started by `AsyncRunner::start`
     #[tokio::test]
@@ -453,15 +485,77 @@ mod tests {
 
     #[tokio::test]
     async fn async_run_command_should_map_exposed_port() -> anyhow::Result<()> {
-        let image = GenericImage::new("simple_web_server", "latest")
-            .with_exposed_port(5000.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("server is ready"))
-            .with_wait_for(WaitFor::seconds(1));
+        let _ = pretty_env_logger::try_init();
+        let image = get_server_container().await.with_exposed_port(5000.tcp());
         let container = image.start().await?;
         container
-            .get_host_port_ipv4(5000)
+            .get_host_port_ipv4(5000.tcp())
             .await
             .expect("Port should be mapped");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "device-requests")]
+    async fn async_run_command_should_request_gpu() -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        use tokio::io::AsyncReadExt as _;
+
+        let _ = pretty_env_logger::try_init();
+
+        // PRECONDITION: the host has GPU and NVIDIA drivers
+        let host_has_gpu = std::process::Command::new("nvidia-smi")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+        if !host_has_gpu {
+            log::warn!("Host does not have GPU or NVIDIA drivers, context: https://www.nvidia.com/en-us/drivers/");
+            return Ok(());
+        }
+
+        // PRECONDITION: Docker on host has NVIDIA runtime
+        let client = bollard::Docker::connect_with_defaults()?;
+        let info = client.info().await?;
+        let has_nvidia_runtimes = info
+            .runtimes
+            .context("No runtimes found")?
+            .iter()
+            .any(|(key, _runtime)| key.contains("nvidia"));
+        if !has_nvidia_runtimes {
+            log::warn!("No Docker NVIDIA runtime installed, context: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html");
+            return Ok(());
+        }
+
+        // GIVEN: a container with a device request for GPU
+        let device_request = bollard::models::DeviceRequest {
+            driver: Some(String::from("nvidia")),
+            count: Some(-1), // expose all
+            capabilities: Some(vec![vec![String::from("gpu")]]),
+            device_ids: None,
+            options: None,
+        };
+
+        // The image must have nvidia drivers installed, so we don't use the simple server here
+        let image = GenericImage::new("ubuntu", "24.04")
+            .with_device_requests(vec![device_request])
+            .with_cmd(["sleep", "infinity"]); // keep the container running to have time to run the command
+        let container = image.start().await?;
+
+        // WHEN: `nvidia-smi` command is executed
+        let mut result = container
+            .exec(crate::core::ExecCommand::new(["nvidia-smi"]))
+            .await?;
+
+        // THEN: the output contains the expected "NVIDIA-SMI" string
+        let mut output: String = String::new();
+        let mut stdout = result.stdout();
+        stdout.read_to_string(&mut output).await?;
+
+        assert!(
+            output.contains("NVIDIA-SMI"),
+            "Could not access NVIDIA System Management Interface"
+        );
+
         Ok(())
     }
 
@@ -474,8 +568,8 @@ mod tests {
         let udp_port = 1000;
         let sctp_port = 2000;
 
-        let generic_server = GenericImage::new("simple_web_server", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("server is ready"))
+        let generic_server = get_server_container()
+            .await
             // Explicitly expose the port, which otherwise would not be available.
             .with_exposed_port(udp_port.udp())
             .with_exposed_port(sctp_port.sctp());
@@ -647,8 +741,8 @@ mod tests {
     #[tokio::test]
     async fn async_should_rely_on_network_mode_when_network_is_provided_and_settings_bridge_empty(
     ) -> anyhow::Result<()> {
-        let web_server = GenericImage::new("simple_web_server", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("server is ready"))
+        let web_server = get_server_container()
+            .await
             .with_wait_for(WaitFor::seconds(1));
 
         let container = web_server.clone().with_network("bridge").start().await?;
@@ -666,8 +760,8 @@ mod tests {
 
     #[tokio::test]
     async fn async_should_return_error_when_non_bridged_network_selected() -> anyhow::Result<()> {
-        let web_server = GenericImage::new("simple_web_server", "latest")
-            .with_wait_for(WaitFor::message_on_stdout("server is ready"))
+        let web_server = get_server_container()
+            .await
             .with_wait_for(WaitFor::seconds(1));
 
         let container = web_server.clone().with_network("host").start().await?;
@@ -871,6 +965,24 @@ mod tests {
             expected_working_dir, &working_dir,
             "working dir must be `foo`"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn async_run_command_should_have_user() -> anyhow::Result<()> {
+        let image = get_server_container().await;
+        let expected_user = "root";
+        let container = image.with_user(expected_user).start().await?;
+
+        let client = Client::lazy_client().await?;
+        let container_details = client.inspect(container.id()).await?;
+
+        let user = container_details
+            .config
+            .expect("ContainerConfig")
+            .user
+            .expect("User");
+        assert_eq!(expected_user, &user, "user must be `root`");
         Ok(())
     }
 }

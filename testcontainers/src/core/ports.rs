@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::IpAddr, num::ParseIntError};
 
-use bollard_stubs::models::{PortBinding, PortMap};
+use bollard::models::{PortBinding, PortMap};
 
 /// Represents a port that is exposed by a container.
 ///
@@ -11,6 +11,7 @@ use bollard_stubs::models::{PortBinding, PortMap};
 )]
 pub enum ContainerPort {
     #[display("{0}/tcp")]
+    #[from_str(regex = r"^(?<0>\d+)(?:/tcp)?$")]
     Tcp(u16),
     #[display("{0}/udp")]
     Udp(u16),
@@ -162,7 +163,7 @@ impl From<u16> for ContainerPort {
 
 #[cfg(test)]
 mod tests {
-    use bollard_stubs::models::ContainerInspectResponse;
+    use bollard::models::ContainerInspectResponse;
 
     use super::*;
 
@@ -333,6 +334,7 @@ mod tests {
     "LinkLocalIPv6Address": "",
     "LinkLocalIPv6PrefixLen": 0,
     "Ports": {
+      "18332": [],
       "18332/tcp": [
         {
           "HostIp": "0.0.0.0",

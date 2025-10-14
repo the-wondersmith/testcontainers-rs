@@ -127,14 +127,36 @@ where
         })
     }
 
-    /// Stops the container (not the same with `pause`).
+    /// Stops the container (not the same with `pause`) using the default 10 second timeout.
     pub fn stop(&self) -> Result<()> {
         self.rt().block_on(self.async_impl().stop())
+    }
+
+    /// Stops the container with timeout before issuing SIGKILL (not the same with `pause`).
+    ///
+    /// Set Some(-1) to wait indefinitely, None to use system configured default and Some(0)
+    /// to forcibly stop the container immediately - otherwise the runtime will issue SIGINT
+    /// and then wait timeout_seconds seconds for the process to stop before issuing SIGKILL.
+    pub fn stop_with_timeout(&self, timeout_seconds: Option<i32>) -> Result<()> {
+        self.rt()
+            .block_on(self.async_impl().stop_with_timeout(timeout_seconds))
     }
 
     /// Starts the container.
     pub fn start(&self) -> Result<()> {
         self.rt().block_on(self.async_impl().start())
+    }
+
+    /// Pause the container.
+    /// [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.48/#tag/Container/operation/ContainerPause)
+    pub async fn pause(&self) -> Result<()> {
+        self.rt().block_on(self.async_impl().pause())
+    }
+
+    /// Resume/Unpause the container.
+    /// [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.48/#tag/Container/operation/ContainerUnpause)
+    pub async fn unpause(&self) -> Result<()> {
+        self.rt().block_on(self.async_impl().unpause())
     }
 
     /// Removes the container.
@@ -187,6 +209,16 @@ where
         Ok(stderr)
     }
 
+    /// Returns whether the container is still running.
+    pub fn is_running(&self) -> Result<bool> {
+        self.rt().block_on(self.async_impl().is_running())
+    }
+
+    /// Returns `Some(exit_code)` when the container is finished and `None` when the container is still running.
+    pub fn exit_code(&self) -> Result<Option<i64>> {
+        self.rt().block_on(self.async_impl().exit_code())
+    }
+
     /// Returns reference to inner `Runtime`. It's safe to unwrap because it's `Some` until `Container` is dropped.
     fn rt(&self) -> &Arc<tokio::runtime::Runtime> {
         &self.inner.as_ref().unwrap().runtime
@@ -218,7 +250,7 @@ impl<I: Image> Drop for Container<I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{core::WaitFor, runners::SyncRunner, GenericImage};
+    use crate::{core::WaitFor, runners::SyncRunner, GenericImage, ImageExt};
 
     #[derive(Debug, Default)]
     pub struct HelloWorld;
@@ -243,6 +275,52 @@ mod test {
     }
 
     fn assert_send_and_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn sync_custom_healthcheck_is_applied() -> anyhow::Result<()> {
+        use std::time::Duration;
+
+        use crate::core::Healthcheck;
+
+        let healthcheck = Healthcheck::cmd_shell("test -f /etc/passwd")
+            .with_interval(Duration::from_secs(1))
+            .with_timeout(Duration::from_secs(1))
+            .with_retries(2);
+
+        let container = GenericImage::new("alpine", "latest")
+            .with_cmd(["sleep", "30"])
+            .with_health_check(healthcheck)
+            .with_ready_conditions(vec![WaitFor::healthcheck()])
+            .start()?;
+
+        let inspect_info = container
+            .rt()
+            .block_on(container.async_impl().docker_client.inspect(container.id()))?;
+
+        assert!(inspect_info.config.is_some());
+        let config = inspect_info
+            .config
+            .expect("Container config must be present");
+        assert!(config.healthcheck.is_some());
+
+        let healthcheck_config = config
+            .healthcheck
+            .expect("Healthcheck config must be present");
+        assert_eq!(
+            healthcheck_config.test,
+            Some(vec![
+                "CMD-SHELL".to_string(),
+                "test -f /etc/passwd".to_string()
+            ])
+        );
+        assert_eq!(healthcheck_config.interval, Some(1_000_000_000));
+        assert_eq!(healthcheck_config.timeout, Some(1_000_000_000));
+        assert_eq!(healthcheck_config.retries, Some(2));
+        assert_eq!(healthcheck_config.start_period, None);
+
+        assert!(container.is_running()?);
+        Ok(())
+    }
 
     #[test]
     fn sync_logs_are_accessible() -> anyhow::Result<()> {

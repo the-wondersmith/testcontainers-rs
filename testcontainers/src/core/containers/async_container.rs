@@ -58,8 +58,12 @@ where
         container_req: ContainerRequest<I>,
         network: Option<Arc<Network>>,
     ) -> Result<ContainerAsync<I>> {
+        let ready_conditions = container_req.ready_conditions();
         let container = Self::construct(id, docker_client, container_req, network);
-        let ready_conditions = container.image().ready_conditions();
+        let state = ContainerState::from_container(&container).await?;
+        for cmd in container.image().exec_before_ready(state)? {
+            container.exec(cmd).await?;
+        }
         container.block_until_ready(ready_conditions).await?;
         Ok(container)
     }
@@ -179,7 +183,7 @@ where
         let network_settings = self.docker_client.inspect_network(&network_mode).await?;
 
         network_settings.driver.ok_or_else(|| {
-            TestcontainersError::other(format!("network {} is not in bridge mode", network_mode))
+            TestcontainersError::other(format!("network {network_mode} is not in bridge mode"))
         })?;
 
         let container_network_settings = container_settings
@@ -235,17 +239,16 @@ where
                     .await
                     .map_err(ExecError::from)?;
             }
-            CmdWaitFor::ExitCode { code } => {
+            CmdWaitFor::Exit { code } => {
                 let exec_id = exec.id().to_string();
                 loop {
                     let inspect = self.docker_client.inspect_exec(&exec_id).await?;
 
                     if let Some(actual) = inspect.exit_code {
-                        if actual != code {
-                            Err(ExecError::ExitCodeMismatch {
-                                expected: code,
-                                actual,
-                            })?;
+                        if let Some(expected) = code {
+                            if actual != expected {
+                                Err(ExecError::ExitCodeMismatch { expected, actual })?;
+                            }
                         }
                         break;
                     } else {
@@ -270,18 +273,48 @@ where
     /// Starts the container.
     pub async fn start(&self) -> Result<()> {
         self.docker_client.start(&self.id).await?;
-        let state = ContainerState::new(self.id(), self.ports().await?);
+        let state = ContainerState::from_container(self).await?;
         for cmd in self.image.exec_after_start(state)? {
             self.exec(cmd).await?;
         }
         Ok(())
     }
 
-    /// Stops the container (not the same with `pause`).
+    /// Stops the container (not the same with `pause`) using the default 10 second timeout
     pub async fn stop(&self) -> Result<()> {
-        log::debug!("Stopping docker container {}", self.id);
+        self.stop_with_timeout(None).await?;
+        Ok(())
+    }
 
-        self.docker_client.stop(&self.id).await?;
+    /// Stops the container with timeout before issuing SIGKILL (not the same with `pause`).
+    ///
+    /// Set Some(-1) to wait indefinitely, None to use system configured default and Some(0)
+    /// to forcibly stop the container immediately - otherwise the runtime will issue SIGINT
+    /// and then wait timeout_seconds seconds for the process to stop before issuing SIGKILL.
+    pub async fn stop_with_timeout(&self, timeout_seconds: Option<i32>) -> Result<()> {
+        log::debug!(
+            "Stopping docker container {} with {} second timeout",
+            self.id,
+            timeout_seconds
+                .map(|t| t.to_string())
+                .unwrap_or("'system default'".into())
+        );
+
+        self.docker_client.stop(&self.id, timeout_seconds).await?;
+        Ok(())
+    }
+
+    /// Pause the container.
+    /// [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.48/#tag/Container/operation/ContainerPause)
+    pub async fn pause(&self) -> Result<()> {
+        self.docker_client.pause(&self.id).await?;
+        Ok(())
+    }
+
+    /// Resume/Unpause the container.
+    /// [Docker Engine API](https://docs.docker.com/reference/api/engine/version/v1.48/#tag/Container/operation/ContainerUnpause)
+    pub async fn unpause(&self) -> Result<()> {
+        self.docker_client.unpause(&self.id).await?;
         Ok(())
     }
 
@@ -334,6 +367,18 @@ where
         let mut stderr = Vec::new();
         self.stderr(false).read_to_end(&mut stderr).await?;
         Ok(stderr)
+    }
+
+    /// Returns whether the container is still running.
+    pub async fn is_running(&self) -> Result<bool> {
+        let status = self.docker_client.container_is_running(&self.id).await?;
+        Ok(status)
+    }
+
+    /// Returns `Some(exit_code)` when the container is finished and `None` when the container is still running.
+    pub async fn exit_code(&self) -> Result<Option<i64>> {
+        let exit_code = self.docker_client.container_exit_code(&self.id).await?;
+        Ok(exit_code)
     }
 
     pub(crate) async fn block_until_ready(&self, ready_conditions: Vec<WaitFor>) -> Result<()> {
@@ -418,7 +463,56 @@ where
 mod tests {
     use tokio::io::AsyncBufReadExt;
 
-    use crate::{images::generic::GenericImage, runners::AsyncRunner};
+    #[cfg(feature = "http_wait")]
+    use crate::core::{wait::HttpWaitStrategy, ContainerPort, ContainerState, ExecCommand};
+    use crate::{
+        core::WaitFor, images::generic::GenericImage, runners::AsyncRunner, Image, ImageExt,
+    };
+
+    #[tokio::test]
+    async fn async_custom_healthcheck_is_applied() -> anyhow::Result<()> {
+        use std::time::Duration;
+
+        use crate::core::Healthcheck;
+
+        let healthcheck = Healthcheck::cmd_shell("test -f /etc/passwd")
+            .with_interval(Duration::from_secs(1))
+            .with_timeout(Duration::from_secs(1))
+            .with_retries(2);
+
+        let container = GenericImage::new("alpine", "latest")
+            .with_cmd(["sleep", "30"])
+            .with_health_check(healthcheck)
+            .with_ready_conditions(vec![WaitFor::healthcheck()])
+            .start()
+            .await?;
+
+        let inspect_info = container.docker_client.inspect(container.id()).await?;
+        assert!(inspect_info.config.is_some());
+
+        let config = inspect_info
+            .config
+            .expect("Container config must be present");
+        assert!(config.healthcheck.is_some());
+
+        let healthcheck_config = config
+            .healthcheck
+            .expect("Healthcheck config must be present");
+        assert_eq!(
+            healthcheck_config.test,
+            Some(vec![
+                "CMD-SHELL".to_string(),
+                "test -f /etc/passwd".to_string()
+            ])
+        );
+        assert_eq!(healthcheck_config.interval, Some(1_000_000_000));
+        assert_eq!(healthcheck_config.timeout, Some(1_000_000_000));
+        assert_eq!(healthcheck_config.retries, Some(2));
+        assert_eq!(healthcheck_config.start_period, None);
+
+        assert!(container.is_running().await?);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn async_logs_are_accessible() -> anyhow::Result<()> {
@@ -531,25 +625,27 @@ mod tests {
 
         let client = crate::core::client::docker_client_instance().await?;
 
-        let options = bollard::container::ListContainersOptions {
-            all: false,
-            limit: Some(2),
-            size: false,
-            filters: std::collections::HashMap::from_iter([(
-                "label".to_string(),
-                labels
-                    .iter()
-                    .map(|(key, value)| format!("{key}={value}"))
-                    .chain([
-                        "org.testcontainers.managed-by=testcontainers".to_string(),
-                        format!(
-                            "org.testcontainers.session-id={}",
-                            crate::runners::async_runner::session_id()
-                        ),
-                    ])
-                    .collect(),
-            )]),
-        };
+        let filters = std::collections::HashMap::from_iter([(
+            "label".to_string(),
+            labels
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .chain([
+                    "org.testcontainers.managed-by=testcontainers".to_string(),
+                    format!(
+                        "org.testcontainers.session-id={}",
+                        crate::runners::async_runner::session_id()
+                    ),
+                ])
+                .collect(),
+        )]);
+
+        let options = bollard::query_parameters::ListContainersOptionsBuilder::new()
+            .all(false)
+            .limit(2)
+            .size(false)
+            .filters(&filters)
+            .build();
 
         let containers = client.list_containers(Some(options)).await?;
 
@@ -593,19 +689,21 @@ mod tests {
 
         let client = crate::core::client::docker_client_instance().await?;
 
-        let options = bollard::container::ListContainersOptions {
-            all: false,
-            limit: Some(2),
-            size: false,
-            filters: std::collections::HashMap::from_iter([(
-                "label".to_string(),
-                labels
-                    .iter()
-                    .map(|(key, value)| format!("{key}={value}"))
-                    .chain(["org.testcontainers.managed-by=testcontainers".to_string()])
-                    .collect(),
-            )]),
-        };
+        let filters = std::collections::HashMap::from_iter([(
+            "label".to_string(),
+            labels
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .chain(["org.testcontainers.managed-by=testcontainers".to_string()])
+                .collect(),
+        )]);
+
+        let options = bollard::query_parameters::ListContainersOptionsBuilder::new()
+            .all(false)
+            .limit(2)
+            .size(false)
+            .filters(&filters)
+            .build();
 
         let containers = client.list_containers(Some(options)).await?;
 
@@ -628,6 +726,8 @@ mod tests {
     #[cfg(feature = "reusable-containers")]
     #[tokio::test]
     async fn async_reusable_containers_are_not_dropped() -> anyhow::Result<()> {
+        use bollard::query_parameters::InspectContainerOptions;
+
         use crate::{ImageExt, ReuseDirective};
 
         let client = crate::core::client::docker_client_instance().await?;
@@ -650,7 +750,7 @@ mod tests {
         };
 
         assert!(client
-            .inspect_container(&container_id, None)
+            .inspect_container(&container_id, None::<InspectContainerOptions>)
             .await?
             .state
             .and_then(|state| state.running)
@@ -659,12 +759,87 @@ mod tests {
         client
             .remove_container(
                 &container_id,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
+                Some(
+                    bollard::query_parameters::RemoveContainerOptionsBuilder::new()
+                        .force(true)
+                        .build(),
+                ),
             )
             .await
             .map_err(anyhow::Error::from)
+    }
+
+    #[cfg(feature = "http_wait")]
+    #[tokio::test]
+    async fn exec_before_ready_is_ran() {
+        struct ExecBeforeReady {}
+
+        impl Image for ExecBeforeReady {
+            fn name(&self) -> &str {
+                "testcontainers/helloworld"
+            }
+
+            fn tag(&self) -> &str {
+                "1.2.0"
+            }
+
+            fn ready_conditions(&self) -> Vec<WaitFor> {
+                vec![WaitFor::http(
+                    HttpWaitStrategy::new("/ping")
+                        .with_port(ContainerPort::Tcp(8080))
+                        .with_expected_status_code(200u16),
+                )]
+            }
+
+            fn expose_ports(&self) -> &[ContainerPort] {
+                &[ContainerPort::Tcp(8080)]
+            }
+
+            #[allow(unused)]
+            fn exec_before_ready(
+                &self,
+                cs: ContainerState,
+            ) -> crate::core::error::Result<Vec<ExecCommand>> {
+                Ok(vec![ExecCommand::new(vec![
+                    "/bin/sh",
+                    "-c",
+                    "echo 'exec_before_ready ran!' > /opt/hello",
+                ])])
+            }
+        }
+
+        let container = ExecBeforeReady {};
+        let container = container.start().await.unwrap();
+        let mut exec_result = container
+            .exec(ExecCommand::new(vec!["cat", "/opt/hello"]))
+            .await
+            .unwrap();
+        let stdout = exec_result.stdout_to_vec().await.unwrap();
+        let output = String::from_utf8(stdout).unwrap();
+        assert_eq!(output, "exec_before_ready ran!\n");
+    }
+
+    #[tokio::test]
+    async fn async_containers_custom_ready_conditions_are_used() {
+        #[derive(Debug, Default)]
+        pub struct HelloWorld;
+
+        impl Image for HelloWorld {
+            fn name(&self) -> &str {
+                "hello-world"
+            }
+
+            fn tag(&self) -> &str {
+                "latest"
+            }
+
+            fn ready_conditions(&self) -> Vec<WaitFor> {
+                vec![WaitFor::message_on_stderr("This won't happen")]
+            }
+        }
+
+        let container = HelloWorld {}
+            .with_ready_conditions(vec![WaitFor::message_on_stdout("Hello from Docker!")]);
+        let _ = container.start().await.unwrap();
     }
 }

@@ -1,18 +1,29 @@
 #![cfg(feature = "blocking")]
 
+use std::time::Instant;
+
 use testcontainers::{
     core::{
         logs::{consumer::logging_consumer::LoggingConsumer, LogFrame},
         wait::LogWaitStrategy,
         CmdWaitFor, ExecCommand, Host, IntoContainerPort, WaitFor,
     },
-    runners::SyncRunner,
-    *,
+    runners::{SyncBuilder, SyncRunner},
+    GenericBuildableImage, *,
 };
 
 fn get_server_container(msg: Option<WaitFor>) -> GenericImage {
+    let generic_image = GenericBuildableImage::new("simple_web_server", "latest")
+        // "Dockerfile" is included already, so adding the build context directory is all what is needed
+        .with_file(
+            std::fs::canonicalize("../testimages/simple_web_server").unwrap(),
+            ".",
+        )
+        .build_image()
+        .unwrap();
+
     let msg = msg.unwrap_or(WaitFor::message_on_stdout("server is ready"));
-    GenericImage::new("simple_web_server", "latest").with_wait_for(msg)
+    generic_image.with_wait_for(msg)
 }
 
 #[derive(Debug, Default)]
@@ -47,11 +58,10 @@ fn sync_wait_for_http() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
     use reqwest::StatusCode;
 
-    let image = GenericImage::new("simple_web_server", "latest")
-        .with_exposed_port(80.tcp())
-        .with_wait_for(WaitFor::http(
-            HttpWaitStrategy::new("/").with_expected_status_code(StatusCode::OK),
-        ));
+    let waitfor_http_status =
+        WaitFor::http(HttpWaitStrategy::new("/").with_expected_status_code(StatusCode::OK));
+
+    let image = get_server_container(Some(waitfor_http_status)).with_exposed_port(80.tcp());
     let _container = image.start()?;
     Ok(())
 }
@@ -84,8 +94,13 @@ fn generic_image_exposed_ports() -> anyhow::Result<()> {
 
     let target_port = 8080;
 
+    let generic_image = GenericBuildableImage::new("no_expose_port", "latest")
+        // "Dockerfile" is included already, so adding the build context directory is all what is needed
+        .with_file(std::fs::canonicalize("../testimages/no_expose_port")?, ".")
+        .build_image()?;
+
     // This server does not EXPOSE ports in its image.
-    let generic_server = GenericImage::new("no_expose_port", "latest")
+    let generic_server = generic_image
         .with_wait_for(WaitFor::message_on_stdout("listening on 0.0.0.0:8080"))
         // Explicitly expose the port, which otherwise would not be available.
         .with_exposed_port(target_port.tcp());
@@ -126,9 +141,12 @@ fn generic_image_port_not_exposed() -> anyhow::Result<()> {
     let target_port = 8080;
 
     // This image binds to 0.0.0.0:8080, does not EXPOSE ports in its dockerfile.
-    let generic_server = GenericImage::new("no_expose_port", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("listening on 0.0.0.0:8080"));
-    let node = generic_server.start()?;
+    let node = GenericBuildableImage::new("no_expose_port", "latest")
+        // "Dockerfile" is included already, so adding the build context directory is all what is needed
+        .with_file(std::fs::canonicalize("../testimages/no_expose_port")?, ".")
+        .build_image()?
+        .with_wait_for(WaitFor::message_on_stdout("listening on 0.0.0.0:8080"))
+        .start()?;
 
     // Without exposing the port with `with_exposed_port()`, we cannot get a mapping to it.
     let res = node.get_host_port_ipv4(target_port.tcp());
@@ -152,19 +170,31 @@ fn start_multiple_containers() -> anyhow::Result<()> {
 fn sync_run_exec() -> anyhow::Result<()> {
     let _ = pretty_env_logger::try_init();
 
-    let image = GenericImage::new("simple_web_server", "latest")
-        .with_wait_for(WaitFor::log(
-            LogWaitStrategy::stdout("server is ready").with_times(2),
-        ))
-        .with_wait_for(WaitFor::seconds(1));
+    let waitfor = WaitFor::log(LogWaitStrategy::stdout("server is ready").with_times(2));
+
+    let image = get_server_container(Some(waitfor)).with_wait_for(WaitFor::seconds(1));
     let container = image.start()?;
 
+    // exit regardless of the code
+    let before = Instant::now();
+    let res = container
+        .exec(ExecCommand::new(["sleep", "2"]).with_cmd_ready_condition(CmdWaitFor::exit()))?;
+    assert_eq!(res.exit_code()?, Some(0));
+    assert!(
+        before.elapsed().as_secs() > 1,
+        "should have waited for 2 seconds"
+    );
+
     // exit code, it waits for result
+    let before = Instant::now();
     let res = container.exec(
-        ExecCommand::new(vec!["sleep".to_string(), "3".to_string()])
-            .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+        ExecCommand::new(["sleep", "2"]).with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
     )?;
     assert_eq!(res.exit_code()?, Some(0));
+    assert!(
+        before.elapsed().as_secs() > 1,
+        "should have waited for 2 seconds"
+    );
 
     // stdout
     let mut res = container.exec(
@@ -269,5 +299,37 @@ fn sync_copy_files_to_container() -> anyhow::Result<()> {
     assert!(out.contains("foofoofoo"));
     assert!(out.contains("barbarbar"));
 
+    Ok(())
+}
+
+#[test]
+fn sync_container_is_running() -> anyhow::Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    // Container that should run until manually quit
+    let container = GenericImage::new("simple_web_server", "latest")
+        .with_wait_for(WaitFor::message_on_stdout("server is ready"))
+        .start()?;
+
+    assert!(container.is_running()?);
+
+    container.stop()?;
+
+    assert!(!container.is_running()?);
+    Ok(())
+}
+
+#[test]
+fn sync_container_exit_code() -> anyhow::Result<()> {
+    let _ = pretty_env_logger::try_init();
+
+    // Container that should run until manually quit
+    let container = get_server_container(None).start()?;
+
+    assert_eq!(container.exit_code()?, None);
+
+    container.stop()?;
+
+    assert_eq!(container.exit_code()?, Some(0));
     Ok(())
 }

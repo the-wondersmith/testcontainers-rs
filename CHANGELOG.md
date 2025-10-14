@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.25.0] - 2025-07-27
+### Details
+#### Bug Fixes
+- Make tls features optional ([#806](https://github.com/testcontainers/testcontainers-rs/pull/806))
+- Add `Send` trait to `stderr` & `stdout` of `ExecResult` ([#809](https://github.com/testcontainers/testcontainers-rs/pull/809))
+- Added new parse rule for correctly parsing ports without protocol specifier ([#812](https://github.com/testcontainers/testcontainers-rs/pull/812))
+
+#### Features
+- Allow ready conditions customization via ImageExt ([#794](https://github.com/testcontainers/testcontainers-rs/pull/794))
+- Allow to wait for log line on either stdout or stderr ([#795](https://github.com/testcontainers/testcontainers-rs/pull/795))
+- Add `Container*::exit_code` ([#791](https://github.com/testcontainers/testcontainers-rs/pull/791))
+- Add `Container*::is_running` ([#790](https://github.com/testcontainers/testcontainers-rs/pull/790))
+- Add custom health check support for containers ([#816](https://github.com/testcontainers/testcontainers-rs/pull/816))
+- Introduce container builder api ([#801](https://github.com/testcontainers/testcontainers-rs/pull/801))
+
+#### Miscellaneous Tasks
+- [❗] Update bollard to 1.19.1 ([#817](https://github.com/testcontainers/testcontainers-rs/pull/817))
+
+#### Refactor
+- Testimages and tests to use builder API ([#804](https://github.com/testcontainers/testcontainers-rs/pull/804))
+## [0.24.0] - 2025-05-04
+### Details
+#### Features
+- Support waiting for commands exit regardless of exit code (#771)
+- Add user configuration for container commands (#784)
+- Add option to stop containers with a timeout (#779)
+- Support `pause` and `unpause` container (#785)
+- Allow `security_opt` and `readonly_rootfs` to be configured (#787)
+
+#### Miscellaneous Tasks
+- Update etcetera requirement from 0.8.0 to 0.9.0 (#773)
+- Update etcetera requirement from 0.9.0 to 0.10.0 (#775)
+## [0.23.3] - 2025-02-19
+### Details
+#### Bug Fixes
+- Proper handling of possible stdin in logs stream (#769)
+
+#### Features
+- Re-export bollard
+## [0.23.2] - 2025-02-06
+### Details
+#### Documentation
+- Add examples of `ImageExt` usage and cover `GenericImage` (#747)
+
+#### Features
+- Add `cap_add` and `cap_drop` support (#726)
+- Add support for user-configured labels (#756)
+- Reusable containers (#757)
+- Add image hook to run commands before ready (#766)
+
+#### Miscellaneous Tasks
+- Update thiserror requirement from 1.0.60 to 2.0.3 (#754)
+- Bump the bollard dep to latest (#759)
+
+#### Testing
+- Deflake the test `start_containers_in_parallel` (#748)
 ## [0.23.1] - 2024-09-26
 ### Details
 #### Features

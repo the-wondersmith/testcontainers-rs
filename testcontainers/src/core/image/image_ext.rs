@@ -1,12 +1,15 @@
 use std::time::Duration;
 
-use bollard_stubs::models::ResourcesUlimits;
+#[cfg(feature = "device-requests")]
+use bollard::models::DeviceRequest;
+use bollard::models::ResourcesUlimits;
 
 use crate::{
     core::{
         copy::{CopyDataSource, CopyToContainer},
+        healthcheck::Healthcheck,
         logs::consumer::LogConsumer,
-        CgroupnsMode, ContainerPort, Host, Mount, PortMapping,
+        CgroupnsMode, ContainerPort, Host, Mount, PortMapping, WaitFor,
     },
     ContainerRequest, Image,
 };
@@ -189,6 +192,72 @@ pub trait ImageExt<I: Image> {
     /// `Container` or `ContainerAsync` is dropped.
     #[cfg(feature = "reusable-containers")]
     fn with_reuse(self, reuse: ReuseDirective) -> ContainerRequest<I>;
+
+    /// Sets the user that commands are run as inside the container.
+    fn with_user(self, user: impl Into<String>) -> ContainerRequest<I>;
+
+    /// Sets the container's root filesystem to be mounted as read-only
+    fn with_readonly_rootfs(self, readonly_rootfs: bool) -> ContainerRequest<I>;
+
+    /// Sets security options for the container
+    fn with_security_opt(self, security_opt: impl Into<String>) -> ContainerRequest<I>;
+
+    /// Overrides ready conditions.
+    ///
+    /// There is no guarantee that the specified ready conditions for an image would result
+    /// in a running container. Users of this API are advised to use this at their own risk.
+    fn with_ready_conditions(self, ready_conditions: Vec<WaitFor>) -> ContainerRequest<I>;
+
+    /// Sets a custom health check for the container.
+    ///
+    /// This will override any `HEALTHCHECK` instruction defined in the image.
+    /// See [`Healthcheck`] for more details on how to build a health check.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use testcontainers::{core::{Healthcheck, WaitFor}, GenericImage, ImageExt};
+    /// use std::time::Duration;
+    ///
+    /// let image = GenericImage::new("mysql", "8.0")
+    ///     .with_wait_for(WaitFor::healthcheck())
+    ///     .with_health_check(
+    ///         Healthcheck::cmd(["mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"])
+    ///             .with_interval(Duration::from_secs(2))
+    ///             .with_timeout(Duration::from_secs(1))
+    ///             .with_retries(5)
+    ///     );
+    /// ```
+    fn with_health_check(self, health_check: Healthcheck) -> ContainerRequest<I>;
+
+    /// Injects device requests into the container request.
+    ///
+    /// This allows, for instance, exposing the underlying host's GPU:
+    /// https://docs.docker.com/compose/how-tos/gpu-support/#example-of-a-compose-file-for-running-a-service-with-access-to-1-gpu-device
+    ///
+    /// This brings in 2 requirements:
+    ///
+    /// - The host must have [NVIDIA container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed.
+    /// - The image must have [NVIDIA drivers](https://www.nvidia.com/en-us/drivers/) installed.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use testcontainers::{GenericImage, ImageExt as _, bollard::models::DeviceRequest};
+    ///
+    /// let device_request = DeviceRequest {
+    ///     driver: Some(String::from("nvidia")),
+    ///     count: Some(-1), // expose all
+    ///     capabilities: Some(vec![vec![String::from("gpu")]]),
+    ///     device_ids: None,
+    ///     options: None,
+    /// };
+    ///
+    /// let image = GenericImage::new("ubuntu", "24.04")
+    ///     .with_device_requests(vec![device_request]);
+    /// ```
+    #[cfg(feature = "device-requests")]
+    fn with_device_requests(self, device_requests: Vec<DeviceRequest>) -> ContainerRequest<I>;
 }
 
 /// Implements the [`ImageExt`] trait for the every type that can be converted into a [`ContainerRequest`].
@@ -401,6 +470,53 @@ impl<RI: Into<ContainerRequest<I>>, I: Image> ImageExt<I> for RI {
         ContainerRequest {
             reuse,
             ..self.into()
+        }
+    }
+
+    fn with_user(self, user: impl Into<String>) -> ContainerRequest<I> {
+        let container_req = self.into();
+        ContainerRequest {
+            user: Some(user.into()),
+            ..container_req
+        }
+    }
+
+    fn with_readonly_rootfs(self, readonly_rootfs: bool) -> ContainerRequest<I> {
+        let container_req = self.into();
+        ContainerRequest {
+            readonly_rootfs,
+            ..container_req
+        }
+    }
+
+    fn with_security_opt(self, security_opt: impl Into<String>) -> ContainerRequest<I> {
+        let mut container_req = self.into();
+        container_req
+            .security_opts
+            .get_or_insert_with(Vec::new)
+            .push(security_opt.into());
+
+        container_req
+    }
+
+    fn with_ready_conditions(self, ready_conditions: Vec<WaitFor>) -> ContainerRequest<I> {
+        let mut container_req = self.into();
+        container_req.ready_conditions = Some(ready_conditions);
+        container_req
+    }
+
+    fn with_health_check(self, health_check: Healthcheck) -> ContainerRequest<I> {
+        let mut container_req = self.into();
+        container_req.health_check = Some(health_check);
+        container_req
+    }
+
+    #[cfg(feature = "device-requests")]
+    fn with_device_requests(self, device_requests: Vec<DeviceRequest>) -> ContainerRequest<I> {
+        let container_req = self.into();
+        ContainerRequest {
+            device_requests: Some(device_requests),
+            ..container_req
         }
     }
 }

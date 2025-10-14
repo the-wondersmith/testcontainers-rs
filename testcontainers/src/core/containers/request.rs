@@ -6,12 +6,14 @@ use std::{
     time::Duration,
 };
 
-use bollard_stubs::models::ResourcesUlimits;
+#[cfg(feature = "device-requests")]
+use bollard::models::DeviceRequest;
+use bollard::models::ResourcesUlimits;
 
 use crate::{
     core::{
-        copy::CopyToContainer, logs::consumer::LogConsumer, mounts::Mount, ports::ContainerPort,
-        ContainerState, ExecCommand, WaitFor,
+        copy::CopyToContainer, healthcheck::Healthcheck, logs::consumer::LogConsumer,
+        mounts::Mount, ports::ContainerPort, ContainerState, ExecCommand, WaitFor,
     },
     Image, TestcontainersError,
 };
@@ -35,6 +37,8 @@ pub struct ContainerRequest<I: Image> {
     pub(crate) privileged: bool,
     pub(crate) cap_add: Option<Vec<String>>,
     pub(crate) cap_drop: Option<Vec<String>>,
+    pub(crate) readonly_rootfs: bool,
+    pub(crate) security_opts: Option<Vec<String>>,
     pub(crate) shm_size: Option<u64>,
     pub(crate) cgroupns_mode: Option<CgroupnsMode>,
     pub(crate) userns_mode: Option<String>,
@@ -43,6 +47,11 @@ pub struct ContainerRequest<I: Image> {
     pub(crate) log_consumers: Vec<Box<dyn LogConsumer + 'static>>,
     #[cfg(feature = "reusable-containers")]
     pub(crate) reuse: crate::ReuseDirective,
+    pub(crate) user: Option<String>,
+    pub(crate) ready_conditions: Option<Vec<WaitFor>>,
+    pub(crate) health_check: Option<Healthcheck>,
+    #[cfg(feature = "device-requests")]
+    pub(crate) device_requests: Option<Vec<DeviceRequest>>,
 }
 
 /// Represents a port mapping between a host's external port and the internal port of a container.
@@ -168,7 +177,9 @@ impl<I: Image> ContainerRequest<I> {
     }
 
     pub fn ready_conditions(&self) -> Vec<WaitFor> {
-        self.image.ready_conditions()
+        self.ready_conditions
+            .clone()
+            .unwrap_or_else(|| self.image.ready_conditions())
     }
 
     pub fn expose_ports(&self) -> &[ContainerPort] {
@@ -196,6 +207,29 @@ impl<I: Image> ContainerRequest<I> {
     pub fn reuse(&self) -> crate::ReuseDirective {
         self.reuse
     }
+
+    /// Returns the configured user that commands are run as inside the container.
+    pub fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
+    pub fn security_opts(&self) -> Option<&Vec<String>> {
+        self.security_opts.as_ref()
+    }
+
+    pub fn readonly_rootfs(&self) -> bool {
+        self.readonly_rootfs
+    }
+
+    /// Returns the custom health check configuration for the container.
+    pub fn health_check(&self) -> Option<&Healthcheck> {
+        self.health_check.as_ref()
+    }
+
+    #[cfg(feature = "device-requests")]
+    pub fn device_requests(&self) -> Option<&[DeviceRequest]> {
+        self.device_requests.as_deref()
+    }
 }
 
 impl<I: Image> From<I> for ContainerRequest<I> {
@@ -217,6 +251,8 @@ impl<I: Image> From<I> for ContainerRequest<I> {
             privileged: false,
             cap_add: None,
             cap_drop: None,
+            security_opts: None,
+            readonly_rootfs: false,
             shm_size: None,
             cgroupns_mode: None,
             userns_mode: None,
@@ -225,6 +261,11 @@ impl<I: Image> From<I> for ContainerRequest<I> {
             log_consumers: vec![],
             #[cfg(feature = "reusable-containers")]
             reuse: crate::ReuseDirective::Never,
+            user: None,
+            ready_conditions: None,
+            health_check: None,
+            #[cfg(feature = "device-requests")]
+            device_requests: None,
         }
     }
 }
@@ -269,10 +310,16 @@ impl<I: Image + Debug> Debug for ContainerRequest<I> {
             .field("cgroupns_mode", &self.cgroupns_mode)
             .field("userns_mode", &self.userns_mode)
             .field("startup_timeout", &self.startup_timeout)
-            .field("working_dir", &self.working_dir);
+            .field("working_dir", &self.working_dir)
+            .field("user", &self.user)
+            .field("ready_conditions", &self.ready_conditions)
+            .field("health_check", &self.health_check);
 
         #[cfg(feature = "reusable-containers")]
         repr.field("reusable", &self.reuse);
+
+        #[cfg(feature = "device-requests")]
+        repr.field("device_requests", &self.device_requests);
 
         repr.finish()
     }
