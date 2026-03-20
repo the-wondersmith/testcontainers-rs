@@ -253,7 +253,7 @@ where
             if matches!(self.reuse, Always | CurrentSession) {
                 log::trace!(
                     "Declining to reap container {} (marked as reuse = {:?})",
-                    &self.id,
+                    &self.id(),
                     self.reuse,
                 );
 
