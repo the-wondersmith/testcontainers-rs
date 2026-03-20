@@ -25,7 +25,13 @@ use crate::{
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(feature = "reusable-containers")]
 static TESTCONTAINERS_SESSION_ID: std::sync::LazyLock<ferroid::id::ULID> =
-    std::sync::LazyLock::new(ferroid::id::ULID::now);
+    std::sync::LazyLock::new(|| {
+        let value = ferroid::id::ULID::now();
+
+        log::trace!("initialized testcontainers session id: {}", value);
+
+        value
+    });
 
 #[doc(hidden)]
 /// A unique identifier for the currently "active" `testcontainers` "session".
@@ -41,7 +47,7 @@ static TESTCONTAINERS_SESSION_ID: std::sync::LazyLock<ferroid::id::ULID> =
 /// as the container name, labels, and network would all still match.
 #[cfg(feature = "reusable-containers")]
 pub(crate) fn session_id() -> &'static ferroid::id::ULID {
-    &TESTCONTAINERS_SESSION_ID
+    <std::sync::LazyLock<_> as std::ops::Deref>::deref(&TESTCONTAINERS_SESSION_ID)
 }
 
 #[async_trait]
@@ -117,6 +123,8 @@ where
 
         #[cfg(feature = "reusable-containers")]
         {
+            use bollard::models::ContainerSummaryStateEnum;
+
             use crate::{
                 core::env::ConfigurationError,
                 ReuseDirective::{Always, CurrentSession},
@@ -130,17 +138,23 @@ where
                     )));
                 }
 
-                if let Some(container_info) = client
-                    .get_container(
+                if let Some((container_id, container_status)) = client
+                    .get_container_id_and_status(
                         container_req.descriptor(),
                         container_req.network().as_deref(),
                         &labels,
                     )
                     .await?
                 {
-                    // Check if container is running, and start it if not
-                    if !container_info.is_running {
-                        client.start_container(&container_info.id).await?;
+                    // Check if the container is running, and start it if not
+                    // Container status is one of: [created, restarting, running, removing, paused, exited, dead]
+                    if !matches!(
+                        container_status,
+                        ContainerSummaryStateEnum::CREATED
+                            | ContainerSummaryStateEnum::RUNNING
+                            | ContainerSummaryStateEnum::RESTARTING
+                    ) {
+                        client.start_container(&container_id).await?;
                     }
 
                     let network = if let Some(network) = container_req.network() {
@@ -150,7 +164,7 @@ where
                     };
 
                     return Ok(ContainerAsync::construct(
-                        container_info.id,
+                        container_id,
                         client,
                         container_req,
                         network,

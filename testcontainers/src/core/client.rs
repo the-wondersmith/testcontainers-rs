@@ -1,5 +1,7 @@
 use std::{collections::HashMap, io, str::FromStr, sync::Arc};
 
+#[cfg(feature = "reusable-containers")]
+use bollard::models::ContainerSummaryStateEnum;
 use bollard::{
     auth::DockerCredentials,
     body_full,
@@ -133,14 +135,6 @@ pub enum ClientError {
     CopyToContainerError(CopyToContainerError),
     #[error("failed to handle data copied from container: {0}")]
     CopyFromContainerError(CopyFromContainerError),
-}
-
-/// Information about a container returned from lookup operations.
-#[cfg(feature = "reusable-containers")]
-#[derive(Debug, Clone)]
-pub(crate) struct ContainerInfo {
-    pub id: String,
-    pub is_running: bool,
 }
 
 /// The internal client.
@@ -771,30 +765,18 @@ impl Client {
         Some(bollard_credentials)
     }
 
-    /// Get the `id` of the first running container whose `image-name[:image-tag]`, `network`,
-    /// and `labels` match the supplied values
+    /// Get the `id` and running status of the first container whose `image-name[:image-tag]`,
+    /// `network`, and `labels` match the supplied values
     #[cfg_attr(not(feature = "reusable-containers"), allow(dead_code))]
-    pub(crate) async fn get_running_container_id(
+    pub(crate) async fn get_container_id_and_status(
         &self,
         image_descriptor: String,
         network: Option<&str>,
         labels: &HashMap<String, String>,
-    ) -> Result<Option<String>, ClientError> {
+    ) -> Result<Option<(String, ContainerSummaryStateEnum)>, ClientError> {
         let filters = [
             Some(("ancestor".to_string(), vec![image_descriptor])),
             network.map(|value| ("network".to_string(), vec![value.to_string()])),
-            Some((
-                "status".to_string(),
-                vec!["created".to_string(), "running".to_string()],
-            )),
-            Some((
-                "health".to_string(),
-                vec![
-                    "none".to_string(),
-                    "healthy".to_string(),
-                    "starting".to_string(),
-                ],
-            )),
             Some((
                 "label".to_string(),
                 labels
@@ -831,9 +813,9 @@ impl Client {
         Ok(containers
             .into_iter()
             // Use `max_by_key()` instead of `next()` to ensure we're
-            // returning the id of most recently created container.
+            // returning the id of the most recently created container.
             .max_by_key(|container| container.created.unwrap_or(i64::MIN))
-            .and_then(|container| container.id))
+            .and_then(|container| container.id.zip(container.state)))
     }
 }
 
