@@ -132,7 +132,7 @@ where
 
                 if let Some(container_info) = client
                     .get_container(
-                        container_req.container_name().as_deref(),
+                        container_req.descriptor(),
                         container_req.network().as_deref(),
                         &labels,
                     )
