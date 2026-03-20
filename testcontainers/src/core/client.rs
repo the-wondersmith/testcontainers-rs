@@ -771,19 +771,30 @@ impl Client {
         Some(bollard_credentials)
     }
 
-    /// Get information about the first container whose `name`, `network`,
-    /// and `labels` match the supplied values, regardless of status.
-    #[cfg(feature = "reusable-containers")]
-    pub(crate) async fn get_container(
+    /// Get the `id` of the first running container whose `image-name[:image-tag]`, `network`,
+    /// and `labels` match the supplied values
+    #[cfg_attr(not(feature = "reusable-containers"), allow(dead_code))]
+    pub(crate) async fn get_running_container_id(
         &self,
-        name: Option<&str>,
+        image_descriptor: String,
         network: Option<&str>,
         labels: &HashMap<String, String>,
-    ) -> Result<Option<ContainerInfo>, ClientError> {
-        use bollard::models::ContainerSummaryStateEnum;
+    ) -> Result<Option<String>, ClientError> {
         let filters = [
-            name.map(|value| ("name".to_string(), vec![value.to_string()])),
+            Some(("ancestor".to_string(), vec![image_descriptor])),
             network.map(|value| ("network".to_string(), vec![value.to_string()])),
+            Some((
+                "status".to_string(),
+                vec!["created".to_string(), "running".to_string()],
+            )),
+            Some((
+                "health".to_string(),
+                vec![
+                    "none".to_string(),
+                    "healthy".to_string(),
+                    "starting".to_string(),
+                ],
+            )),
             Some((
                 "label".to_string(),
                 labels
@@ -796,15 +807,16 @@ impl Client {
         .flatten()
         .collect::<HashMap<_, _>>();
 
-        let options = ListContainersOptionsBuilder::new()
-            .all(true)
-            .size(false)
-            .filters(&filters)
-            .build();
+        let options = Some(bollard::query_parameters::ListContainersOptions {
+            all: false,
+            size: false,
+            limit: None,
+            filters: Some(filters.clone()),
+        });
 
         let containers = self
             .bollard
-            .list_containers(Some(options))
+            .list_containers(options)
             .await
             .map_err(ClientError::ListContainers)?;
 
@@ -821,13 +833,7 @@ impl Client {
             // Use `max_by_key()` instead of `next()` to ensure we're
             // returning the id of most recently created container.
             .max_by_key(|container| container.created.unwrap_or(i64::MIN))
-            .and_then(|container| {
-                container.id.map(|id| {
-                    let is_running =
-                        matches!(container.state, Some(ContainerSummaryStateEnum::RUNNING));
-                    ContainerInfo { id, is_running }
-                })
-            }))
+            .and_then(|container| container.id))
     }
 }
 
