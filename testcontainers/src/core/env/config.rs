@@ -41,7 +41,9 @@ pub const DEFAULT_DOCKER_HOST: &str = "npipe:////./pipe/docker_engine";
 pub(crate) struct Config {
     tc_host: Option<String>,
     host: Option<String>,
+    #[allow(dead_code)]
     tls_verify: Option<bool>,
+    #[allow(dead_code)]
     cert_path: Option<PathBuf>,
     command: Option<Command>,
     docker_auth_config: Option<String>,
@@ -176,10 +178,12 @@ impl Config {
             })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn tls_verify(&self) -> bool {
         self.tls_verify.unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn cert_path(&self) -> Option<&Path> {
         self.cert_path.as_deref()
     }
