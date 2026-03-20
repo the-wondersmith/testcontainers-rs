@@ -1036,7 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn async_run_command_should_have_working_dir() -> anyhow::Result<()> {
-        let image = GenericImage::new("testcontainers/helloworld", "1.2.0");
+        let image = GenericImage::new("testcontainers/helloworld", "1.3.0");
         let expected_working_dir = "/foo";
         let container = image.with_working_dir(expected_working_dir).start().await?;
 
