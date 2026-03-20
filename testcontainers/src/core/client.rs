@@ -767,7 +767,7 @@ impl Client {
 
     /// Get the `id` and running status of the first container whose `image-name[:image-tag]`,
     /// `network`, and `labels` match the supplied values
-    #[cfg_attr(not(feature = "reusable-containers"), allow(dead_code))]
+    #[cfg(feature = "reusable-containers")]
     pub(crate) async fn get_container_id_and_status(
         &self,
         image_descriptor: String,
